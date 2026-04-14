@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import sqlite3
 import subprocess
 from io import StringIO
@@ -15,8 +16,9 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-DB_PATH    = Path("chat.db")
-UPLOADS_DIR = Path("uploads")
+_HOME       = Path(os.environ.get("HOME", "/home/primary-user"))
+DB_PATH     = _HOME / "chat.db"
+UPLOADS_DIR = _HOME / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -188,7 +190,9 @@ body {
 # ── AI ────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "You are a helpful assistant."
+    "You are a helpful assistant teaching novice users how to write effective AI prompts. "
+    "Guide them with clear, encouraging feedback. When they submit a prompt, evaluate its "
+    "clarity, specificity, and structure, and suggest concrete improvements."
 )
 
 _agent: Agent | None = None
@@ -616,4 +620,4 @@ if __name__ in {"__main__", "__mp_main__"}:
     elif args.evaluate:
         asyncio.run(cmd_evaluate())
     else:
-        ui.run(title="AI Assistant", favicon="🤖", port=3000)
+        ui.run(title="Assistant", favicon="🤖", port=3000, host="0.0.0.0")
