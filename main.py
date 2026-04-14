@@ -616,4 +616,4 @@ if __name__ in {"__main__", "__mp_main__"}:
     elif args.evaluate:
         asyncio.run(cmd_evaluate())
     else:
-        ui.run(title="Assistant", favicon="🤖", port=8080)
+        ui.run(title="AI Assistant", favicon="🤖", port=3000)
