@@ -19,4 +19,4 @@ ENV HOME /home/primary-user
 USER primary-user
 
 EXPOSE 3000
-CMD ["sleep", "infinity"]
+CMD [ "python", "./main.py" ]
