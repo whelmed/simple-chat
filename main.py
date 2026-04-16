@@ -16,16 +16,18 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-_HOME       = Path(os.environ.get("HOME", "/home/primary-user"))
-DB_PATH     = _HOME / "chat.db"
-UPLOADS_DIR = _HOME / "uploads"
+_HOME          = Path(os.environ.get("HOME", "/home/primary"))
+DB_PATH        = _HOME / "chat.db"
+UPLOADS_DIR    = _HOME / "uploads"
+SHARED_DIR     = Path("/home/project")
+RESPONSE_FILE  = SHARED_DIR / "response.json"
+AI_CONFIG_FILE = SHARED_DIR / "ai_config.json"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
 
+# ── Constants ─────────────────────────────────────────────────────────────────
 HUMAN = "human"
 ROBOT = "robot"
-
 # ── Database ──────────────────────────────────────────────────────────────────
 
 def db_init() -> None:
@@ -110,6 +112,19 @@ CONFIG: dict[str, str] = {
 def config_save(key: str, value: str) -> None:
     CONFIG[key] = value
     db_save_config(key, value)
+    try:
+        SHARED_DIR.mkdir(parents=True, exist_ok=True)
+        AI_CONFIG_FILE.write_text(
+            json.dumps({
+                "endpoint":    CONFIG.get("endpoint", ""),
+                "api_key":     CONFIG.get("api_key", ""),
+                "api_version": CONFIG.get("api_version", ""),
+                "deployment":  CONFIG.get("deployment", ""),
+            }, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 # ── Theme ─────────────────────────────────────────────────────────────────────
@@ -189,11 +204,13 @@ body {
 
 # ── AI ────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = (
-    "You are a helpful assistant teaching novice users how to write effective AI prompts. "
-    "Guide them with clear, encouraging feedback. When they submit a prompt, evaluate its "
-    "clarity, specificity, and structure, and suggest concrete improvements."
-)
+SYSTEM_PROMPT = """
+You are an AI assistant.
+
+When the user gives you a prompt follow it precisely.
+If the prompt is vague or incomplete, do your best with what you have — but note briefly
+
+""".strip()
 
 _agent: Agent | None = None
 _agent_config_snapshot: dict = {}
@@ -208,10 +225,10 @@ def get_agent() -> Agent:
     client = AsyncAzureOpenAI(
         azure_endpoint=CONFIG["endpoint"],
         api_key=CONFIG["api_key"],
-        api_version=CONFIG["api_version"] or "2024-07-01-preview",
+        api_version=CONFIG["api_version"] or "2023-05-15",
     )
     model = OpenAIChatModel(
-        CONFIG["deployment"] or "gpt-4o",
+        CONFIG["deployment"] or "gpt-4.1-mini",
         provider=OpenAIProvider(openai_client=client),
     )
     _agent = Agent(model, instructions=SYSTEM_PROMPT)
@@ -342,7 +359,30 @@ async def chat_messages() -> None:
 # ── Actions ───────────────────────────────────────────────────────────────────
 
 async def toggle_flag(message_id: int, currently_flagged: bool) -> None:
-    db_set_flag(message_id, not currently_flagged)
+    now_flagged = not currently_flagged
+    db_set_flag(message_id, now_flagged)
+    # Write the flagged response to the shared mount whenever a flag is set.
+    # Cleared flags remove the file so the workspace container sees no result.
+    if now_flagged:
+        rows = db_load()
+        row = next((r for r in rows if r["id"] == message_id), None)
+        if row:
+            try:
+                SHARED_DIR.mkdir(parents=True, exist_ok=True)
+                RESPONSE_FILE.write_text(f"""
+                    Flagged Response:
+
+                    {row["text"]}
+                    """,
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+    else:
+        try:
+            RESPONSE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
     chat_messages.refresh()
 
 
@@ -444,6 +484,10 @@ async def confirm_clear(parent_dialog: ui.dialog) -> None:
             async def cleared():
                 confirm_dialog.close()
                 db_clear()
+                try:
+                    RESPONSE_FILE.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 parent_dialog.close()
                 chat_messages.refresh()
             ui.button("Clear", icon="delete_outline", on_click=cleared, color="negative")
@@ -553,32 +597,14 @@ async def page_layout() -> None:
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-def cmd_flagged(n: int = 5) -> None:
-    """Print the flagged bot message and the N preceding user prompts as JSON."""
-    rows = db_load()
-    flagged = [r for r in rows if r["flagged"] and r["whom"] == ROBOT]
-    if not flagged:
-        print(json.dumps({"flagged": None}))
-        return
-    row = flagged[0]
-    idx = next(i for i, r in enumerate(rows) if r["id"] == row["id"])
-    preceding: list[str] = []
-    for r in reversed(rows[:idx]):
-        if r["whom"] == HUMAN and not r["file"]:
-            preceding.insert(0, r["text"])
-            if len(preceding) == n:
-                break
-    print(json.dumps({"flagged": {"id": row["id"], "prompts": preceding, "response": row["text"]}}, indent=2))
-
-
 async def cmd_evaluate() -> None:
     """Read a prompt from stdin and send it to the configured AI (no history, no DB writes).
 
     Usage:
         python main.py --evaluate < prompt.txt
-        python main.py --evaluate << 'EOF'
-        ...multi-line prompt with embedded JSON...
-        EOF
+
+        # Evaluate a flagged response against a rubric:
+        (cat evaluate_prompt.txt && python main.py --flagged --n 3) | python main.py --evaluate
     """
     import sys
     if not CONFIG.get("endpoint") or not CONFIG.get("api_key"):
@@ -586,7 +612,7 @@ async def cmd_evaluate() -> None:
         return
     prompt = sys.stdin.read().strip()
     if not prompt:
-        print(json.dumps({"error": "No prompt provided on stdin."}))
+        print(json.dumps({"error": "No input provided on stdin."}))
         return
     client = AsyncAzureOpenAI(
         azure_endpoint=CONFIG["endpoint"],
@@ -607,17 +633,20 @@ if __name__ in {"__main__", "__mp_main__"}:
     import argparse, asyncio
 
     parser = argparse.ArgumentParser(description="Prompt learning assistant")
-    parser.add_argument("--flagged",  action="store_true", help="Print flagged message as JSON and exit")
-    parser.add_argument("--n",        type=int, default=5, help="Number of preceding prompts to include (default: 5)")
     parser.add_argument("--evaluate", action="store_true", help="Read prompt from stdin, send to AI, print response, exit")
+    parser.add_argument("--config",   type=str, default=None, help="Path to ai_config.json to load Azure credentials")
     args, _ = parser.parse_known_args()
 
     db_init()
     CONFIG.update(db_load_config())
+    if args.config:
+        try:
+            CONFIG.update(json.loads(Path(args.config).read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(json.dumps({"error": f"Cannot load config file: {exc}"}))
+            raise SystemExit(1)
 
-    if args.flagged:
-        cmd_flagged(args.n)
-    elif args.evaluate:
+    if args.evaluate:
         asyncio.run(cmd_evaluate())
     else:
         ui.run(title="Assistant", favicon="🤖", port=3000, host="0.0.0.0")
